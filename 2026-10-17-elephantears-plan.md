@@ -1,6 +1,6 @@
 # ElephantEars — plan (draft for approval, 2026-10-17)
 
-A Plaud replacement that runs on Alex's work laptop: records meetings (Teams and in-room), transcribes them, and serves the raw transcripts to Claude the same way the Plaud connector does today, so the Work Workflow check-in keeps working with one name swapped.
+A Plaud replacement that runs on Alex's work laptop: records meetings (Teams and in-room), transcribes them, and writes **one markdown file per meeting** with the transcript. The markdown file is the product; everything else exists to produce it or to hand it to Claude for the Work Workflow check-in.
 
 ## What Plaud does for Alex today (what must be replaced)
 
@@ -15,10 +15,38 @@ Not needed: Plaud's AI summaries, the outline block, the mobile app. Nice to kee
 
 1. **Laptop app records, laptop transcribes.** A small tray app (Python, installed with `uv` into the user profile, no admin rights needed) captures the microphone and the system audio (what the Teams call plays) as two channels and transcribes locally with Whisper (faster-whisper). Local transcription is what makes this cheaper than Plaud: cloud transcription of 15 h/week costs about as much as the Plaud plan.
 2. **Two channels give speaker separation for free.** Mic = Alex, loopback = everyone else. Remote speakers are labelled "Speaker 2, 3…" only if diarization is turned on later; this already matches what Plaud gives.
-3. **Transcripts go to a tiny Cloudflare Worker (free plan, same account as DogHaus)** with a D1 table and an MCP endpoint that mirrors the Plaud tools (`list_files`, `get_transcript`, `get_file`). Claude gets an "ElephantEars" connector; the Work Workflow page swaps "Plaud" for it, nothing else changes. Audio stays on the laptop (optional R2 upload later).
-4. **Same auth pattern as the DogHouse connector** (OAuth approval page behind the Cloudflare email code); the laptop uploads with a long-lived token.
+3. **The output is a markdown file per meeting** (format below), written to a folder Alex chooses (decision 2026-10-17). No JSON, no database, no connector in the core build. Audio stays on the laptop.
+4. **Getting the file to Claude is a separate, small step** (Phase 2). Options, cheapest first: Alex attaches or pastes the file into the check-in chat; the app posts it to DogHaus as a Work page or as a file on a meeting; or, later, a tiny Cloudflare Worker that serves the files to Claude as a connector mirroring the Plaud tools. Decide after Phase 1, once the files exist.
 5. **Manual start/stop is parity with Plaud.** Auto-detecting Teams calls is a Phase 3 nicety.
-6. **No new subscriptions.** Cloudflare free, local Whisper. Optional cloud fallback (Cloudflare Workers AI Whisper or Groq) only if the laptop CPU is too slow; cost to verify on real numbers.
+6. **No new subscriptions.** Local Whisper. Optional cloud fallback (Cloudflare Workers AI Whisper or Groq) only if the laptop CPU is too slow; cost to verify on real numbers.
+
+## The markdown file
+
+One file per recording, named `YYYY-MM-DD-HHMM-short-title.md` (title from the Teams window when available, otherwise from the first minute of speech, editable afterwards). Timestamps are `hh:mm:ss` from the start of the recording; speakers are "Alex" (mic channel) and "Speaker 2, 3…" (system audio), renamable by editing the file.
+
+```markdown
+# Retail media consultation
+
+- Date: 2026-10-16 12:30
+- Duration: 29 min
+- Source: Teams (ElephantEars)
+- Highlights: 2
+
+## Highlights
+
+- [00:12:40] Alex: We'd want the API connection in place before the Walmart move.
+- [00:21:05] Speaker 2: I'll send the proposal by Friday.
+
+## Transcript
+
+**[00:00:00] Alex:** Hey. How are you? My headphones did not connect.
+
+**[00:00:09] Speaker 2:** I hate when that happens. It's funny, I have my AirPods, but…
+
+**[00:00:28] Alex:** Yeah. We've had that. My wife works from home too…
+```
+
+Rules: consecutive segments by the same speaker within 3 seconds are merged into one paragraph; a highlight (the Mark hotkey) quotes the segment it landed on; the header block stays machine-readable so a later Phase 2 can index the files.
 
 ## Open questions (Alex)
 
@@ -37,28 +65,25 @@ Not needed: Plaud's AI summaries, the outline block, the mobile app. Nice to kee
 
 ### Phase 1 — recorder (the thing that replaces the device)
 - Tray app: Start / Stop / Mark highlight; hotkeys. Shows "recording 12:34".
-- Writes `recordings/YYYY-MM-DD-HHMM/` with audio (Opus or WAV), a `meta.json` (start, duration, title from the active Teams window if available, marks) and, after transcription, `transcript.json` in the Plaud segment shape.
-- Transcription runs in the background after Stop, mic and loopback channels separately, merged by time into one speaker-labelled transcript.
-- Crash-safe: audio is written in chunks so a laptop sleep or crash loses at most a few seconds.
-- Tests for the merge and the transcript shape.
+- Records mic and system audio as two channels into `<folder>/audio/YYYY-MM-DD-HHMM.wav` (chunked, so a sleep or crash loses at most a few seconds).
+- After Stop, transcribes both channels in the background, merges them by time, and writes `<folder>/YYYY-MM-DD-HHMM-short-title.md` in the format above. A notification says when the file is ready.
+- Tests for the channel merge, paragraph merging, highlight placement and the markdown output.
 
-### Phase 2 — the feed to Claude (replaces the Plaud connector)
-- Cloudflare Worker + D1: `recordings` and `segments` tables; `POST /upload` from the laptop; MCP endpoint with `list_files` (date filters, paging), `get_transcript` (paged, `mark_memo` block), `get_file` (metadata).
-- OAuth sign-in reused from DogHouse; add the connector to Claude; test a live check-in.
-- Update the "Work Workflow" page in DogHaus: Plaud → ElephantEars (ids keep the `plaud` field name on meetings or get a new one, decide then).
+### Phase 2 — the file reaches Claude (replaces the Plaud connector)
+- Pick one after Phase 1 has produced real files: (a) attach/paste into the check-in chat, nothing to build; (b) the app posts the markdown to DogHaus (a Work page, or a file on the meeting) through its API; (c) a Cloudflare Worker that serves the files to Claude as an "ElephantEars" connector mirroring the Plaud tools.
+- Update the "Work Workflow" page in DogHaus: Plaud → ElephantEars files.
 - Run both for two weeks, then cancel Plaud.
 
 ### Phase 3 — polish
 - Auto-start when a Teams call begins (audio session detection), auto-title from the calendar/Teams window, auto-stop on silence.
 - Optional speaker diarization on the remote channel (pyannote, local) or speaker naming by Alex after the fact.
-- Retention: delete local audio after N days; export a recording on demand.
-- Optional cloud transcription fallback; optional audio upload to R2.
+- Retention: delete local audio after N days; the markdown files are kept.
+- Optional cloud transcription fallback.
 
 ## Stack
 
 - Laptop: Python 3.12 via `uv`; `sounddevice` + WASAPI loopback (Windows) or ScreenCaptureKit/BlackHole (Mac); `faster-whisper`; `pystray` for the tray; `pytest`.
-- Cloud: Cloudflare Worker (TypeScript), D1, same tooling and tests as DogHouse; `wrangler`.
-- Shape of a transcript segment (matches Plaud): `{start_time, end_time, content, speaker, segment_uid}` with times in milliseconds.
+- Output: markdown only, format above. No cloud component unless Phase 2 picks option (c), in which case a Cloudflare Worker (TypeScript) like DogHouse.
 
 ## Risks
 
