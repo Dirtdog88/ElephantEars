@@ -17,7 +17,7 @@ Not needed: Plaud's AI summaries, the outline block, the mobile app. Nice to kee
 2. **Two channels give speaker separation for free.** Mic = Alex, loopback = everyone else. Remote speakers are labelled "Speaker 2, 3…" only if diarization is turned on later; this already matches what Plaud gives.
 3. **The output is a markdown file per meeting** (format below), written to `Documents\ElephantEars` by default (configurable). No JSON, no database, no connector in the core build.
 3a. **Audio is deleted as soon as the markdown file is written** (decision 2026-10-17). It exists only as a temporary working file during the recording and the transcription; if transcription fails, the audio is kept until a retry succeeds, then deleted.
-4. **Getting the file to Claude is a separate, small step** (Phase 2). Options, cheapest first: Alex attaches or pastes the file into the check-in chat; the app posts it to DogHaus as a Work page or as a file on a meeting; or, later, a tiny Cloudflare Worker that serves the files to Claude as a connector mirroring the Plaud tools. Decide after Phase 1, once the files exist.
+4. **The app posts every markdown file to DogHaus automatically** (decision 2026-10-18). Each transcript becomes a Work page in a "Recordings" project, tagged `new`; the local file stays as the copy. The check-in reads the `new` pages instead of Plaud. This needs one small addition on the DogHaus side (an ingest endpoint with a device token; see Phase 2) in the DogHouse repo.
 5. **Manual start/stop is parity with Plaud.** Auto-detecting Teams calls is a Phase 3 nicety.
 6. **No new subscriptions.** Local Whisper only. If the laptop CPU is too slow for `medium.en`, step down to `small.en` or `distil-whisper`; no cloud option.
 7. **Windows only; Teams and Zoom calls only** (decision 2026-10-17). No in-room recording to design for; both apps play remote audio through the default output device, which WASAPI loopback captures.
@@ -58,15 +58,19 @@ Rules: consecutive segments by the same speaker within 3 seconds are merged into
 4. **No audio kept.** Deleted once the markdown file is written.
 5. Company policy on recording: Plaud is already in use, so the assumption is that it's fine as today.
 
+6. Transcripts are **added to DogHaus automatically** (2026-10-18). Only the transcript text leaves the laptop, and only to DogHaus; audio never does.
+
 ## Still open
 
 - Output folder: `Documents\ElephantEars` unless Alex prefers somewhere synced.
+- Whether the corporate network lets the laptop reach `home.dirtdogcollective.com` (Phase 0 checks).
 
 ## Phases
 
 ### Phase 0 — spike on the work laptop (1 session)
 - Repo skeleton, this plan on `master`.
 - Check `uv` installs into the user profile and Python runs (no admin).
+- Check the laptop can reach `home.dirtdogcollective.com` over HTTPS from the work network (corporate proxies and TLS inspection are the usual blockers).
 - A 40-line script: record 60 s of mic + system audio (WASAPI loopback) during a Teams or Zoom test call, transcribe with faster-whisper `small.en` and `medium.en`, print timing. This answers: can we capture call audio on this laptop, and how long does a 30-minute meeting take to transcribe on its CPU.
 - Go/no-go on local transcription; pick the model.
 
@@ -77,10 +81,19 @@ Rules: consecutive segments by the same speaker within 3 seconds are merged into
 - Title from the Teams or Zoom window title when available.
 - Tests for the channel merge, paragraph merging, highlight placement and the markdown output.
 
-### Phase 2 — the file reaches Claude (replaces the Plaud connector)
-- Pick one after Phase 1 has produced real files: (a) attach/paste into the check-in chat, nothing to build; (b) the app posts the markdown to DogHaus (a Work page, or a file on the meeting) through its API; (c) a Cloudflare Worker that serves the files to Claude as an "ElephantEars" connector mirroring the Plaud tools.
-- Update the "Work Workflow" page in DogHaus: Plaud → ElephantEars files.
-- Run both for two weeks, then cancel Plaud.
+### Phase 2 — the file lands in DogHaus (replaces the Plaud connector)
+DogHaus side (DogHouse repo, added to the session for this phase):
+- `POST /api/transcripts` on the Worker: body is the markdown plus `title`, `date`, `duration_sec`, `source` (teams/zoom), `recorded_at`; creates a Work page under the "Recordings" project with tag `new` and those values in `props`; idempotent on a client-generated recording id so a retry never makes a duplicate.
+- Auth: a per-device API token (created in DogHaus settings, stored once on the laptop in Windows Credential Manager), checked by the Worker; the path is added to the Cloudflare Access bypass like `/mcp`.
+- The meeting's existing `plaud` field holds the transcript page id (renamed to `recording` later if it bothers us); `list_items` type meeting plaud <id> keeps working for "already processed".
+
+ElephantEars side:
+- After the markdown is written, post it; on failure (offline, DogHaus down) leave a `.pending` marker next to the file and retry on the next app start and every 10 minutes.
+- Tray shows "sent" / "pending (3)" so nothing is lost silently.
+
+Workflow side:
+- Update the "Work Workflow" page in DogHaus: step 1 of the check-in reads pages tagged `new` in Recordings (`list_items` type page tag new), saves meetings with `add_meeting`, puts the page id in `plaud`, and swaps the tag from `new` to `processed`.
+- Run both ElephantEars and Plaud for two weeks, then cancel Plaud.
 
 ### Phase 3 — polish
 - Optional speaker diarization on the remote channel (pyannote, local) or speaker naming by Alex after the fact.
@@ -89,7 +102,8 @@ Rules: consecutive segments by the same speaker within 3 seconds are merged into
 ## Stack
 
 - Laptop: Windows, Python 3.12 via `uv`; `pyaudiowpatch` (PyAudio with WASAPI loopback) for system audio plus `sounddevice` for the mic; `faster-whisper`; `pystray` for the tray; `pytest`.
-- Output: markdown only, format above. No cloud component unless Phase 2 picks option (c), in which case a Cloudflare Worker (TypeScript) like DogHouse.
+- Output: markdown, format above; posted to DogHaus with `httpx`, token kept in Windows Credential Manager via `keyring`.
+- DogHaus side: one endpoint and one token type in the existing DogHouse Worker (TypeScript, D1), with its usual tests.
 
 ## Risks
 
